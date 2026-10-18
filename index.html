@@ -164,8 +164,8 @@ main{flex:1;display:flex;flex-direction:column;align-items:center;justify-conten
     <div class="stepper"><button id="aMinus">−</button><div class="v" id="aVal">440 Hz</div><button id="aPlus">+</button></div>
   </div>
   <div class="row">
-    <div><div>Tolerância de "afinado"</div><div class="muted">Menor = mais preciso</div></div>
-    <div class="stepper"><button id="tolMinus">−</button><div class="v" id="tolVal">±4¢</div><button id="tolPlus">+</button></div>
+    <div><div>Tolerância de "afinado"</div><div class="muted">Padrão: ±0,15 Hz</div></div>
+    <div class="stepper"><button id="tolMinus">−</button><div class="v" id="tolVal">±0.15 Hz</div><button id="tolPlus">+</button></div>
   </div>
   <button class="ghost" id="btnResetTuned">Limpar marcações ✓ das cordas</button>
   <p class="muted" style="margin-top:14px;line-height:1.5">Dica: no modo <b>Auto</b> o app descobre qual corda você tocou. Toque numa corda da lista para travar nela (útil em afinações muito baixas, tipo Drop A).</p>
@@ -215,7 +215,7 @@ const store={
   set(k,v){try{localStorage.setItem(k,JSON.stringify(v))}catch(e){}}
 };
 let custom=store.get('afina.custom',[]);
-let prefs=Object.assign({tuning:'std',a4:440,auto:true,tol:4},store.get('afina.prefs',{}));
+let prefs=Object.assign({tuning:'std',a4:440,auto:true,tolHz:0.15},store.get('afina.prefs',{}));
 const savePrefs=()=>store.set('afina.prefs',prefs);
 const allTunings=()=>BUILTIN.concat(custom.map(c=>Object.assign({cat:'Minhas afinações'},c)));
 function current(){return allTunings().find(t=>t.id===prefs.tuning)||BUILTIN[1]}
@@ -225,7 +225,7 @@ const $=id=>document.getElementById(id);
 
 function applyTuning(){
   const t=current();
-  strMidi=t.notes.map(noteToMidi);
+  strMidi=t.notes.map(noteToMidi);curFt=0;resetTracker();
   tuned=strMidi.map(()=>false);
   if(manualIdx>=strMidi.length) manualIdx=0;
   $('tName').textContent=t.name;
@@ -240,7 +240,7 @@ function renderStrings(){
   t.notes.forEach((n,i)=>{
     const [l,o]=splitNote(n); const b=document.createElement('button');
     b.className='str'; b.innerHTML=`${l}<sub>${o}</sub>`;
-    b.onclick=()=>{manualIdx=i;setAuto(false);playTone(strMidi[i]);highlight(i)};
+    b.onclick=()=>{manualIdx=i;setAuto(false);resetTracker();playTone(strMidi[i]);highlight(i)};
     wrap.appendChild(b);
   });
   highlight(prefs.auto?-1:manualIdx);
@@ -251,7 +251,7 @@ function highlight(idx){
     el.classList.toggle('tuned',!!tuned[i]);
   });
 }
-function setAuto(v){prefs.auto=v;savePrefs();$('btnAuto').classList.toggle('on',v);$('btnAuto').textContent=v?'Auto':'Manual';highlight(v?-1:manualIdx)}
+function setAuto(v){prefs.auto=v;resetTracker();savePrefs();$('btnAuto').classList.toggle('on',v);$('btnAuto').textContent=v?'Auto':'Manual';highlight(v?-1:manualIdx)}
 
 /* ---------- gauge ---------- */
 const MAXDEG=70;
@@ -265,12 +265,13 @@ const MAXDEG=70;
   g.innerHTML=h;
 })();
 function drawOkArc(){
-  const cx=150,cy=160,r=146,a=prefs.tol/50*MAXDEG*Math.PI/180;
+  const ft=curFt||freqOf(strMidi[0]||57),okC=Math.min(50,1200*Math.log2((ft+prefs.tolHz)/ft));
+  const cx=150,cy=160,r=146,a=Math.max(okC,0.6)/50*MAXDEG*Math.PI/180;
   $('okArc').setAttribute('d',`M${cx-r*Math.sin(a)} ${cy-r*Math.cos(a)} A${r} ${r} 0 0 1 ${cx+r*Math.sin(a)} ${cy-r*Math.cos(a)}`);
 }
 
 /* ---------- display ---------- */
-let inTuneSince=0;
+let inTuneSince=0, curFt=0;
 function resetDisplay(){
   $('note').className='note';$('note').innerHTML='–';$('cents').textContent='';
   $('hint').className='hint idle';$('hint').textContent=current().notes.length?'Toque uma corda':'Toque qualquer nota';
@@ -281,23 +282,21 @@ function setNeedle(c,ok){
   const col=ok?'#2ee59d':'#ff9f43';$('needleLine').setAttribute('stroke',col);$('needleDot').setAttribute('fill',col);
 }
 function freqOf(m){return prefs.a4*Math.pow(2,(m-69)/12)}
-function show(midiF,f){
-  const t=current(); let target, idx=-1, name;
-  if(!t.notes.length){target=Math.round(midiF);name=midiToName(target,false)}
-  else{
-    if(prefs.auto){let best=1e9;strMidi.forEach((m,i)=>{const d=Math.abs(midiF-m);if(d<best){best=d;idx=i}})}
-    else idx=manualIdx;
-    target=strMidi[idx];name=t.notes[idx];
-  }
-  const cents=(midiF-target)*100, ok=Math.abs(cents)<=prefs.tol;
+function show(r){
+  const t=current(), idx=r.idx, target=r.target;
+  const name=idx>=0?t.notes[idx]:midiToName(target,false);
+  const f=freqOf(r.midiF), ft=freqOf(target), dHz=f-ft, cents=(r.midiF-target)*100;
+  const ok=Math.abs(dHz)<=prefs.tolHz+1e-9;
+  if(Math.abs(ft-curFt)>0.01){curFt=ft;drawOkArc()}
   const [l,o]=splitNote(name);
   $('note').innerHTML=`${l}<sub>${o}</sub>`;$('note').className='note'+(ok?' ok':'');
-  $('cents').textContent=(cents>0?'+':'')+cents.toFixed(0)+' cents';
+  const sg=v=>(v>0?'+':v<0?'−':'');
+  $('cents').textContent=`${sg(cents)}${Math.abs(cents).toFixed(0)} cents  ·  ${sg(dHz)}${Math.abs(dHz).toFixed(2)} Hz`;
   const h=$('hint');
   if(ok){h.className='hint ok';h.textContent='Afinado ✓'}
-  else if(cents<0){h.className='hint up';h.textContent=cents<-50?'Bem baixo — aperte ↑':'Aperte ↑'}
+  else if(dHz<0){h.className='hint up';h.textContent=cents<-50?'Bem baixo — aperte ↑':'Aperte ↑'}
   else{h.className='hint down';h.textContent=cents>50?'Bem alto — afrouxe ↓':'Afrouxe ↓'}
-  $('freq').textContent=`${f.toFixed(1)} Hz  ·  alvo ${freqOf(target).toFixed(1)} Hz`;
+  $('freq').textContent=`${f.toFixed(2)} Hz  ·  alvo ${ft.toFixed(2)} Hz`;
   setNeedle(cents,ok);
   if(idx>=0){
     const now=performance.now();
@@ -307,6 +306,7 @@ function show(midiF,f){
   }
 }
 
+/*CORE-START*/
 /* ---------- pitch detection (YIN) ---------- */
 function yin(x,sr){
   const minT=Math.floor(sr/1100), maxT=Math.floor(sr/45), W=x.length-maxT;
@@ -315,17 +315,62 @@ function yin(x,sr){
   d[0]=1;let run=0;
   for(let t=1;t<=maxT;t++){run+=d[t];d[t]=run?d[t]*t/run:1}
   let tau=-1;
-  for(let t=minT;t<maxT;t++){
-    if(d[t]<0.15){while(t+1<maxT&&d[t+1]<d[t])t++;tau=t;break}
-  }
-  if(tau<0){let mi=minT;for(let t=minT;t<maxT;t++)if(d[t]<d[mi])mi=t;if(d[mi]<0.3)tau=mi;else return -1}
-  let bt=tau;
+  for(let t=minT;t<maxT;t++){if(d[t]<0.12){while(t+1<maxT&&d[t+1]<d[t])t++;tau=t;break}}
+  if(tau<0){tau=minT;for(let t=minT;t<maxT;t++)if(d[t]<d[tau])tau=t}
+  const ap=d[tau];let bt=tau;
   if(tau>1&&tau<maxT){const a=d[tau-1],b=d[tau],c=d[tau+1],den=a+c-2*b;if(den)bt=tau+(a-c)/(2*den)}
-  return sr/bt;
+  return {f:sr/bt,ap};
 }
 
+/* ---------- note tracker ----------
+   Trava na corda detectada no ataque e só troca num novo ataque (ou se
+   a leitura ficar longe por vários quadros seguidos). Erros de oitava
+   no fim da vibração são dobrados de volta para a oitava da corda. */
+function makeTracker(){return{active:false,peak:0,prev:0,quiet:0,lock:null,idx:-1,cand:null,candN:0,out:0,hist:[],ds:null}}
+function nearestTarget(mf,strings){
+  if(!strings.length)return{idx:-1,midi:Math.round(mf)};
+  let best=null;
+  for(const k of[0,-12,12]){const m=mf+k,pen=k?0.35:0;
+    strings.forEach((s,i)=>{const d=Math.abs(m-s)+pen;if(!best||d<best.d)best={d,idx:i,midi:s}})}
+  return best;
+}
+function foldTo(mf,target){let b=mf;for(const k of[-24,-12,12,24])if(Math.abs(mf+k-target)<Math.abs(b-target))b=mf+k;return b}
+function track(T,buf,sr,strings,a4,manual){
+  let rms=0;for(let i=0;i<buf.length;i++)rms+=buf[i]*buf[i];rms=Math.sqrt(rms/buf.length);
+  const prev=T.prev;T.prev=rms;
+  if(rms<0.006){if(T.active&&++T.quiet>=20){Object.assign(T,makeTracker());return 'reset'}return null}
+  T.quiet=0;
+  if(!T.active||(rms>prev*1.6&&rms>0.012)){            // novo ataque
+    T.active=true;T.peak=rms;T.hist=[];T.out=0;T.cand=null;T.candN=0;
+    if(manual>=0&&strings.length){T.lock=strings[manual];T.idx=manual}else{T.lock=null;T.idx=-1}
+  }
+  T.peak=Math.max(T.peak,rms);
+  if(rms<T.peak*0.04)return null;                       // fim da vibração: congela
+  const half=buf.length>>1;if(!T.ds||T.ds.length!==half)T.ds=new Float32Array(half);
+  for(let i=0;i<half;i++)T.ds[i]=(buf[2*i]+buf[2*i+1])*.5;
+  const r=yin(T.ds,sr/2);
+  if(r.ap>0.2||r.f>1100||r.f<40)return null;            // leitura pouco confiável
+  const mf=69+12*Math.log2(r.f/a4);
+  if(T.lock===null){
+    const c=nearestTarget(mf,strings),key=strings.length?c.idx:c.midi;
+    if(key===T.cand)T.candN++;else{T.cand=key;T.candN=1}
+    if(T.candN<3)return null;                           // 3 quadros concordando
+    T.lock=c.midi;T.idx=c.idx;T.out=0;T.hist=[];
+  }
+  const m=foldTo(mf,T.lock),lim=manual>=0?6:(strings.length?1.5:0.7);
+  if(Math.abs(m-T.lock)>lim){
+    if(manual<0&&++T.out>=6){T.lock=null;T.idx=-1;T.cand=null;T.candN=0;T.hist=[]}
+    return null;
+  }
+  T.out=0;T.hist.push(m);if(T.hist.length>5)T.hist.shift();
+  const s=[...T.hist].sort((a,b)=>a-b);
+  return{midiF:s[s.length>>1],target:T.lock,idx:T.idx};
+}
+/*CORE-END*/
+
 /* ---------- audio ---------- */
-let ctx,analyser,buf,ds,raf,lastProc=0,silent=0,hist=[],wakeLock=null;
+let ctx,analyser,buf,raf,lastProc=0,wakeLock=null,T=makeTracker();
+function resetTracker(){T=makeTracker();inTuneSince=0}
 function ensureCtx(){if(!ctx)ctx=new (window.AudioContext||window.webkitAudioContext)();if(ctx.state==='suspended')ctx.resume();return ctx}
 async function start(){
   const msg=$('startMsg');
@@ -334,7 +379,7 @@ async function start(){
     const stream=await navigator.mediaDevices.getUserMedia({audio:{echoCancellation:false,noiseSuppression:false,autoGainControl:false}});
     const src=ctx.createMediaStreamSource(stream);
     analyser=ctx.createAnalyser();analyser.fftSize=4096;src.connect(analyser);
-    buf=new Float32Array(analyser.fftSize);ds=new Float32Array(analyser.fftSize/2);
+    buf=new Float32Array(analyser.fftSize);
     $('start').style.display='none';keepAwake();tick();
   }catch(e){
     msg.classList.add('err');
@@ -345,17 +390,9 @@ function tick(){
   raf=requestAnimationFrame(tick);
   const now=performance.now();if(now-lastProc<40)return;lastProc=now;
   analyser.getFloatTimeDomainData(buf);
-  let rms=0;for(let i=0;i<buf.length;i++)rms+=buf[i]*buf[i];rms=Math.sqrt(rms/buf.length);
-  if(rms<0.006){if(++silent===20){resetDisplay();hist=[];inTuneSince=0;highlight(prefs.auto?-1:manualIdx)}return}
-  for(let i=0;i<ds.length;i++)ds[i]=(buf[2*i]+buf[2*i+1])*.5;
-  const f=yin(ds,ctx.sampleRate/2);
-  if(f<=0||f>1100)return;
-  silent=0;
-  const mf=69+12*Math.log2(f/prefs.a4);
-  if(hist.length&&Math.abs(mf-hist[hist.length-1])>0.6)hist=[];
-  hist.push(mf);if(hist.length>5)hist.shift();
-  const med=[...hist].sort((a,b)=>a-b)[hist.length>>1];
-  show(med,prefs.a4*Math.pow(2,(med-69)/12));
+  const r=track(T,buf,ctx.sampleRate,strMidi,prefs.a4,prefs.auto?-1:manualIdx);
+  if(r==='reset'){resetDisplay();inTuneSince=0;highlight(prefs.auto?-1:manualIdx)}
+  else if(r)show(r);
 }
 function playTone(m){
   const c=ensureCtx(),t=c.currentTime,o=c.createOscillator(),g=c.createGain();
@@ -426,12 +463,12 @@ $('btnSaveCustom').onclick=()=>{
 };
 
 /* settings */
-function renderSettings(){$('aVal').textContent=prefs.a4+' Hz';$('tolVal').textContent='±'+prefs.tol+'¢';drawOkArc()}
+function renderSettings(){$('aVal').textContent=prefs.a4+' Hz';$('tolVal').textContent='±'+prefs.tolHz.toFixed(2)+' Hz';drawOkArc()}
 $('btnSettings').onclick=()=>{renderSettings();open('sheetSettings')};
-$('aMinus').onclick=()=>{prefs.a4=Math.max(420,prefs.a4-1);savePrefs();renderSettings()};
-$('aPlus').onclick=()=>{prefs.a4=Math.min(460,prefs.a4+1);savePrefs();renderSettings()};
-$('tolMinus').onclick=()=>{prefs.tol=Math.max(1,prefs.tol-1);savePrefs();renderSettings()};
-$('tolPlus').onclick=()=>{prefs.tol=Math.min(10,prefs.tol+1);savePrefs();renderSettings()};
+$('aMinus').onclick=()=>{prefs.a4=Math.max(420,prefs.a4-1);curFt=0;resetTracker();savePrefs();renderSettings()};
+$('aPlus').onclick=()=>{prefs.a4=Math.min(460,prefs.a4+1);curFt=0;resetTracker();savePrefs();renderSettings()};
+$('tolMinus').onclick=()=>{prefs.tolHz=Math.max(0.05,Math.round((prefs.tolHz-0.05)*100)/100);savePrefs();renderSettings()};
+$('tolPlus').onclick=()=>{prefs.tolHz=Math.min(1,Math.round((prefs.tolHz+0.05)*100)/100);savePrefs();renderSettings()};
 $('btnResetTuned').onclick=()=>{tuned=tuned.map(()=>false);highlight(prefs.auto?-1:manualIdx);closeSheet()};
 
 $('btnAuto').onclick=()=>setAuto(!prefs.auto);
