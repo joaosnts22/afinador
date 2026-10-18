@@ -340,7 +340,7 @@ function track(T,buf,sr,strings,a4,manual){
   const prev=T.prev;T.prev=rms;
   if(rms<0.006){if(T.active&&++T.quiet>=20){Object.assign(T,makeTracker());return 'reset'}return null}
   T.quiet=0;
-  if(!T.active||(rms>prev*1.6&&rms>0.012)){            // novo ataque
+  if(!T.active||(rms>prev*1.6&&rms>0.012&&rms>T.peak*0.15)){ // novo ataque
     T.active=true;T.peak=rms;T.hist=[];T.out=0;T.cand=null;T.candN=0;
     if(manual>=0&&strings.length){T.lock=strings[manual];T.idx=manual}else{T.lock=null;T.idx=-1}
   }
@@ -359,7 +359,10 @@ function track(T,buf,sr,strings,a4,manual){
   }
   const m=foldTo(mf,T.lock),lim=manual>=0?6:(strings.length?1.5:0.7);
   if(Math.abs(m-T.lock)>lim){
-    if(manual<0&&++T.out>=6){T.lock=null;T.idx=-1;T.cand=null;T.candN=0;T.hist=[]}
+    // Só destrava se o som "estranho" for forte (outra corda tocada de verdade).
+    // No fim da vibração, ressonância de outras cordas apenas congela o ponteiro.
+    if(manual<0&&rms>T.peak*0.4){if(++T.out>=6){T.lock=null;T.idx=-1;T.cand=null;T.candN=0;T.hist=[]}}
+    else T.out=0;
     return null;
   }
   T.out=0;T.hist.push(m);if(T.hist.length>5)T.hist.shift();
