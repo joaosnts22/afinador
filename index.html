@@ -10,7 +10,7 @@
 <link rel="icon" href="icon.svg" type="image/svg+xml">
 <link rel="apple-touch-icon" href="icon-192.png">
 <title>Afina</title>
-<!-- v4 -->
+<!-- v5 -->
 <style>
 :root{
   --bg:#0d0e12;--surface:#16181e;--surface2:#1f222a;--line:#2a2e38;
@@ -94,7 +94,7 @@ main{flex:1;display:flex;flex-direction:column;align-items:center;justify-conten
 <body>
 
 <header>
-  <div class="brand">Afi<span>na</span> <small style="font-size:11px;color:var(--muted);font-weight:500">v4</small></div>
+  <div class="brand">Afi<span>na</span> <small style="font-size:11px;color:var(--muted);font-weight:500">v5</small></div>
   <button class="iconbtn" id="btnSettings" aria-label="Configurações">
     <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M4 6h10M18 6h2M4 12h4M12 12h8M4 18h12M20 18h0"/><circle cx="16" cy="6" r="2"/><circle cx="10" cy="12" r="2"/><circle cx="18" cy="18" r="2"/></svg>
   </button>
@@ -168,6 +168,10 @@ main{flex:1;display:flex;flex-direction:column;align-items:center;justify-conten
     <div><div>Tolerância de "afinado"</div><div class="muted">Padrão: ±0,15 Hz</div></div>
     <div class="stepper"><button id="tolMinus">−</button><div class="v" id="tolVal">±0.15 Hz</div><button id="tolPlus">+</button></div>
   </div>
+  <div class="row">
+    <div><div>Sensibilidade do microfone</div><div class="muted">Alta = capta cordas mais fracas</div></div>
+    <div class="stepper"><button id="sMinus">−</button><div class="v" id="sVal">Normal</div><button id="sPlus">+</button></div>
+  </div>
   <button class="ghost" id="btnResetTuned">Limpar marcações ✓ das cordas</button>
   <p class="muted" style="margin-top:14px;line-height:1.5">Dica: no modo <b>Auto</b> o app descobre qual corda você tocou. Toque numa corda da lista para travar nela (útil em afinações muito baixas, tipo Drop A).</p>
 </div>
@@ -216,7 +220,7 @@ const store={
   set(k,v){try{localStorage.setItem(k,JSON.stringify(v))}catch(e){}}
 };
 let custom=store.get('afina.custom',[]);
-let prefs=Object.assign({tuning:'std',a4:440,auto:true,tolHz:0.15},store.get('afina.prefs',{}));
+let prefs=Object.assign({tuning:'std',a4:440,auto:true,tolHz:0.15,sens:1},store.get('afina.prefs',{}));
 const savePrefs=()=>store.set('afina.prefs',prefs);
 const allTunings=()=>BUILTIN.concat(custom.map(c=>Object.assign({cat:'Minhas afinações'},c)));
 function current(){return allTunings().find(t=>t.id===prefs.tuning)||BUILTIN[1]}
@@ -292,7 +296,8 @@ function show(r){
   const [l,o]=splitNote(name);
   $('note').innerHTML=`${l}<sub>${o}</sub>`;$('note').className='note'+(ok?' ok':'');
   const sg=v=>(v>0?'+':v<0?'−':'');
-  $('cents').textContent=`${sg(cents)}${Math.abs(cents).toFixed(0)} cents  ·  ${sg(dHz)}${Math.abs(dHz).toFixed(2)} Hz`;
+  const cR=Math.round(cents),hR=Math.round(dHz*100)/100;
+  $('cents').textContent=`${sg(cR)}${Math.abs(cR)} cents  ·  ${sg(hR)}${Math.abs(hR).toFixed(2)} Hz`;
   const h=$('hint');
   if(ok){h.className='hint ok';h.textContent='Afinado ✓'}
   else if(dHz<0){h.className='hint up';h.textContent=cents<-50?'Bem baixo — aperte ↑':'Aperte ↑'}
@@ -308,26 +313,76 @@ function show(r){
 }
 
 /*CORE-START*/
-/* ---------- pitch detection (YIN) ---------- */
-function yin(x,sr){
-  const minT=Math.floor(sr/1100), maxT=Math.floor(sr/45), W=x.length-maxT;
-  const d=new Float32Array(maxT+1);
-  for(let t=1;t<=maxT;t++){let s=0;for(let i=0;i<W;i++){const v=x[i]-x[i+t];s+=v*v}d[t]=s}
-  d[0]=1;let run=0;
-  for(let t=1;t<=maxT;t++){run+=d[t];d[t]=run?d[t]*t/run:1}
-  let tau=-1;
-  for(let t=minT;t<maxT;t++){if(d[t]<0.12){while(t+1<maxT&&d[t+1]<d[t])t++;tau=t;break}}
-  if(tau<0){tau=minT;for(let t=minT;t<maxT;t++)if(d[t]<d[tau])tau=t}
-  const ap=d[tau];let bt=tau;
-  if(tau>1&&tau<maxT){const a=d[tau-1],b=d[tau],c=d[tau+1],den=a+c-2*b;if(den)bt=tau+(a-c)/(2*den)}
-  return {f:sr/bt,ap};
+/* ---------- FFT (radix-2) para o espectro ---------- */
+const FFTN=4096;let _re,_im,_win,_rev,_cos,_sin;
+function fftInit(){
+  const N=FFTN;_re=new Float32Array(N);_im=new Float32Array(N);_win=new Float32Array(N);_rev=new Uint32Array(N);
+  _cos=new Float32Array(N/2);_sin=new Float32Array(N/2);
+  for(let i=0;i<N;i++){_win[i]=0.5-0.5*Math.cos(2*Math.PI*i/(N-1));let r=0,x=i;for(let b=0;b<12;b++){r=(r<<1)|(x&1);x>>=1}_rev[i]=r}
+  for(let k=0;k<N/2;k++){_cos[k]=Math.cos(2*Math.PI*k/N);_sin[k]=-Math.sin(2*Math.PI*k/N)}
+}
+function magSpec(buf,out){                       // |X|^0.5 (comprime partes fortes)
+  if(!_re)fftInit();const N=FFTN,off=buf.length-N;
+  for(let i=0;i<N;i++){_re[_rev[i]]=buf[off+i]*_win[i];_im[_rev[i]]=0}
+  for(let size=2;size<=N;size<<=1){const h=size>>1,st=N/size;
+    for(let i=0;i<N;i+=size)for(let j=0;j<h;j++){const k=j*st,a=i+j,b=a+h,wr=_cos[k],wi=_sin[k];
+      const tr=_re[b]*wr-_im[b]*wi,ti=_re[b]*wi+_im[b]*wr;_re[b]=_re[a]-tr;_im[b]=_im[a]-ti;_re[a]+=tr;_im[a]+=ti}}
+  for(let k=0;k<N/2;k++)out[k]=Math.sqrt(Math.sqrt(_re[k]*_re[k]+_im[k]*_im[k]));
+}
+/* altura da energia NOVA: soma harmônica (6 harmônicos) */
+let _cands=null;
+function harmonicPitch(spec,sr){
+  if(!_cands){_cands=[];for(let c=0;;c+=10){const f=40*Math.pow(2,c/1200);if(f>1100)break;_cands.push(f)}}
+  const bw=sr/FFTN,nb=spec.length;let best=0,bf=0;const all=[];
+  for(const f of _cands){let s=0;
+    for(let h=1;h<=6;h++){const b=h*f/bw;if(b>=nb-2)break;const w=b*0.026;
+      let m=0;for(let k=Math.round(b-w);k<=Math.round(b+w);k++)if(spec[k]>m)m=spec[k];s+=m}
+    if(s>best){best=s;bf=f}all.push(s)}
+  all.sort((a,b)=>a-b);const med=all[all.length>>1]||1e-9;
+  return{f:bf,score:best,q:best/med};
 }
 
+/* ---------- YIN ---------- */
+function cmnd(x,sr,maxT){
+  const full=Math.floor(sr/38);maxT=maxT||full;const W=x.length-Math.max(maxT,Math.min(full,x.length>>1)),d=new Float32Array(maxT+1);
+  const raw=new Float32Array(maxT+1);
+  for(let t=1;t<=maxT;t++){let s=0;for(let i=0;i<W;i++){const v=x[i]-x[i+t];s+=v*v}raw[t]=s}
+  d[0]=1;let run=0;for(let t=1;t<=maxT;t++){run+=raw[t];d[t]=run?raw[t]*t/run:1}
+  d.raw=raw;return d;
+}
+// interpolação parabólica na diferença BRUTA (como no artigo do YIN): sem viés
+function interp(d,tau){const a=d.raw||d;if(tau>1&&tau<a.length-1){const p=a[tau-1],q=a[tau],r=a[tau+1],den=p+r-2*q;if(den)return tau+(p-r)/(2*den)}return tau}
+function yinGlobal(d,sr){
+  const minT=Math.floor(sr/1100),maxT=d.length-1;let tau=-1;
+  for(let t=minT;t<maxT;t++){if(d[t]<0.12){while(t+1<maxT&&d[t+1]<d[t])t++;tau=t;break}}
+  if(tau<0){tau=minT;for(let t=minT;t<maxT;t++)if(d[t]<d[tau])tau=t}
+  return{f:sr/interp(d,tau),ap:d[tau]};
+}
+function yinRange(d,sr,fLo,fHi){                  // procura o período só perto da corda-alvo
+  const lo=Math.max(2,Math.floor(sr/fHi)),hi=Math.min(d.length-2,Math.ceil(sr/fLo));let tau=lo;
+  for(let t=lo;t<=hi;t++)if(d[t]<d[tau])tau=t;
+  // primeiro vale bom (evita confundir com múltiplos do período em faixas largas)
+  for(let t=lo+1;t<hi;t++)if(d[t]<0.2&&d[t]<=d[t-1]&&d[t]<=d[t+1]){if(d[t]<d[tau]*2+0.05)tau=t;break}
+  if(tau===lo||tau===hi)return{f:sr/tau,ap:1};    // mínimo na borda = não há período ali
+  return{f:sr/interp(d,tau),ap:d[tau]};
+}
+
+/* passa-altas (2x biquad) abaixo da corda-alvo: tira o grave que ainda soa */
+function highpass(x,out,fc,sr){
+  const w=2*Math.PI*fc/sr,cs=Math.cos(w),al=Math.sin(w)/(2*Math.SQRT1_2),a0=1+al;
+  const b0=(1+cs)/2/a0,b1=-(1+cs)/a0,b2=b0,a1=-2*cs/a0,a2=(1-al)/a0;
+  for(let p=0;p<2;p++){let x1=0,x2=0,y1=0,y2=0;const src=p?out:x;
+    for(let i=0;i<x.length;i++){const xi=src[i],y=b0*xi+b1*x1+b2*x2-a1*y1-a2*y2;x2=x1;x1=xi;y2=y1;y1=y;out[i]=y}}
+}
 /* ---------- note tracker ----------
-   Trava na corda detectada no ataque e só troca num novo ataque (ou se
-   a leitura ficar longe por vários quadros seguidos). Erros de oitava
-   no fim da vibração são dobrados de volta para a oitava da corda. */
-function makeTracker(){return{active:false,peak:0,prev:0,quiet:0,lock:null,idx:-1,cand:null,candN:0,out:0,hist:[],ds:null}}
+   1) Piso de ruído adaptativo (funciona com mic forte ou fraco).
+   2) Ataque detectado pela energia NOVA no espectro (fluxo espectral).
+   3) A corda é escolhida pelas frequências que "acenderam" no ataque,
+      ignorando cordas que já estavam soando ou ressoando.
+   4) A afinação é medida procurando só em volta da corda escolhida. */
+function makeTracker(){return{active:false,peak:0,prevN:0,quiet:0,floor:0.002,
+  mag:null,prevMag:null,acc:null,fluxAvg:0,fluxFloor:null,hp:null,bad:0,lockPk:0,lock:null,idx:-1,pend:0,out:0,
+  hist:[],ds:null,since:99,cand:null,candN:0}}
 function nearestTarget(mf,strings){
   if(!strings.length)return{idx:-1,midi:Math.round(mf)};
   let best=null;
@@ -336,44 +391,88 @@ function nearestTarget(mf,strings){
   return best;
 }
 function foldTo(mf,target){let b=mf;for(const k of[-24,-12,12,24])if(Math.abs(mf+k-target)<Math.abs(b-target))b=mf+k;return b}
-function track(T,buf,sr,strings,a4,manual){
-  let rms=0;for(let i=0;i<buf.length;i++)rms+=buf[i]*buf[i];rms=Math.sqrt(rms/buf.length);
-  const prev=T.prev;T.prev=rms;
-  if(rms<0.0025){if(T.active&&++T.quiet>=20){Object.assign(T,makeTracker());return 'reset'}return null}
+const K_LO=4,K_HI=190;                              // ~47 Hz a ~2,2 kHz
+function track(T,buf,sr,strings,a4,manual,sens){
+  sens=sens||1;const L=buf.length,toM=f=>69+12*Math.log2(f/a4),toF=m=>a4*Math.pow(2,(m-69)/12);
+  let rms=0;for(let i=0;i<L;i++)rms+=buf[i]*buf[i];rms=Math.sqrt(rms/L);
+  let rn=0;for(let i=L-2048;i<L;i++)rn+=buf[i]*buf[i];rn=Math.sqrt(rn/2048);
+  T.floor=rn<T.floor?T.floor*0.6+rn*0.4:Math.min(0.03,T.floor*1.0015);
+  const sil=Math.max(0.0005,T.floor*2.2)/sens;
+  // espectro e fluxo (energia nova)
+  if(!T.mag){T.mag=new Float32Array(FFTN/2);T.prevMag=new Float32Array(FFTN/2);T.acc=new Float32Array(FFTN/2);T.first=true}
+  magSpec(buf,T.mag);let flux=0;
+  for(let k=K_LO;k<K_HI;k++){const v=T.mag[k]-T.prevMag[k];if(v>0)flux+=v}
+  if(T.first){T.first=false;flux=0}
+  else if(T.fluxFloor===null)T.fluxFloor=flux;
+  else T.fluxFloor=flux<T.fluxFloor?T.fluxFloor*0.5+flux*0.5:T.fluxFloor*1.003;
+  const onset=T.since>3&&T.fluxFloor!==null&&((flux>T.fluxAvg*2.5&&flux>T.fluxFloor*4/sens&&rn>sil)||(rn>T.prevN*1.8&&rn>sil*2));
+  T.fluxAvg=T.fluxAvg*0.8+flux*0.2;T.prevN=rn;
+  const pm=T.prevMag;T.prevMag=T.mag;T.mag=pm;            // troca buffers (prevMag = atual)
+  if(rms<sil&&!onset){T.since++;if(T.active&&++T.quiet>=15){T.active=false;T.lock=null;T.idx=-1;T.pend=0;return 'reset'}return null}
   T.quiet=0;
-  if(!T.active||(rms>prev*1.6&&rms>0.005&&rms>T.peak*0.15)){ // novo ataque
-    T.active=true;T.peak=rms;T.hist=[];T.out=0;T.cand=null;T.candN=0;
-    if(manual>=0&&strings.length){T.lock=strings[manual];T.idx=manual}else{T.lock=null;T.idx=-1}
+  if(onset||!T.active){
+    T.save=T.active&&T.lock!==null?{lock:T.lock,idx:T.idx,peak:T.peak,lockPk:T.lockPk,hist:T.hist.slice(),ema:T.ema,emaLock:T.emaLock}:null;
+    T.active=true;T.peak=rms;T.hist=[];T.out=0;T.bad=0;T.since=0;T.cand=null;T.candN=0;T.acc.fill(0);
+    if(manual>=0&&strings.length){T.lock=strings[manual];T.idx=manual;T.pend=0;T.lockPk=rms}else{T.lock=null;T.idx=-1;T.pend=3}
   }
-  T.peak=Math.max(T.peak,rms);
-  if(rms<T.peak*0.04)return null;                       // fim da vibração: congela
-  const half=buf.length>>1;if(!T.ds||T.ds.length!==half)T.ds=new Float32Array(half);
+  T.since++;T.peak=Math.max(T.peak,rms);
+  const half=L>>1;if(!T.ds||T.ds.length!==half)T.ds=new Float32Array(half);
   for(let i=0;i<half;i++)T.ds[i]=(buf[2*i]+buf[2*i+1])*.5;
-  const r=yin(T.ds,sr/2);
-  if(r.ap>0.2||r.f>1100||r.f<40)return null;            // leitura pouco confiável
-  const mf=69+12*Math.log2(r.f/a4);
-  if(T.lock===null){
-    const c=nearestTarget(mf,strings),key=strings.length?c.idx:c.midi;
-    if(key===T.cand)T.candN++;else{T.cand=key;T.candN=1}
-    if(T.candN<3)return null;                           // 3 quadros concordando
-    T.lock=c.midi;T.idx=c.idx;T.out=0;T.hist=[];
+  const sr2=sr/2,d=cmnd(T.ds,sr2);
+  if(T.pend>0){                                         // acumulando a energia nova do ataque
+    const cur=T.prevMag,old=T.mag;
+    for(let k=K_LO;k<K_HI;k++){const v=cur[k]-old[k];if(v>0)T.acc[k]+=v}
+    if(--T.pend>0)return null;
+    const hp=harmonicPitch(T.acc,sr);
+    let ok=false;
+    if(hp.score>0){
+      let f0=hp.f;
+      if(!strings.length){                                // cromático: refina antes de arredondar
+        const rr=yinRange(d,sr2,f0*0.94,f0*1.06);if(rr.ap<0.4)f0=rr.f;
+        if(f0>=50){T.lock=Math.round(toM(f0));T.idx=-1;ok=true}
+      }else{                                              // o ataque precisa cair perto de uma corda
+        const mf0=toM(f0);let bi=-1,bd=1e9;strings.forEach((sm,i)=>{const dd=Math.abs(mf0-sm);if(dd<bd){bd=dd;bi=i}});
+        if(bd<=1.5){T.lock=strings[bi];T.idx=bi;ok=true}
+      }
+    }
+    if(ok)T.lockPk=T.peak;
+    else if(T.save)Object.assign(T,T.save);               // batida/ruído: mantém a corda anterior
+    T.save=null;
   }
-  const m=foldTo(mf,T.lock),lim=manual>=0?6:(strings.length?1.5:0.7);
-  if(Math.abs(m-T.lock)>lim){
-    // Só destrava se o som "estranho" for forte (outra corda tocada de verdade).
-    // No fim da vibração, ressonância de outras cordas apenas congela o ponteiro.
-    if(manual<0&&rms>T.peak*0.4){if(++T.out>=6){T.lock=null;T.idx=-1;T.cand=null;T.candN=0;T.hist=[]}}
-    else T.out=0;
+  if(rms<T.peak*0.03)return null;                       // fim da vibração: congela
+  const g=yinGlobal(d,sr2);
+  if(T.lock===null){                                    // re-seleção sem ataque claro
+    if(g.ap>0.2||g.f>1100)return null;
+    const c=nearestTarget(toM(g.f),strings),key=strings.length?c.idx:c.midi;
+    if(key===T.cand)T.candN++;else{T.cand=key;T.candN=1}
+    if(T.candN<3)return null;
+    T.lock=c.midi;T.idx=c.idx;T.hist=[];T.out=0;T.lockPk=T.peak;
+  }
+  const lim=manual>=0?6:(strings.length?1.5:0.7),fLo=toF(T.lock-lim),fHi=toF(T.lock+lim);
+  // cordas agudas: mede na taxa cheia (mais precisão); graves: na taxa reduzida
+  const hiRes=fLo>=170,src=hiRes?buf:T.ds,srr=hiRes?sr:sr2;
+  if(!T.hp||T.hp.length!==src.length)T.hp=new Float32Array(src.length);
+  highpass(src,T.hp,fLo*0.7,srr);
+  const hpv=T.hp.subarray(Math.floor(src.length*0.15));   // descarta o transiente do filtro
+  const r=yinRange(cmnd(hpv,srr,Math.min(Math.floor(srr/38),Math.ceil(srr/fLo)+2)),srr,fLo,fHi);
+  if(r.ap>0.45){
+    // não consigo medir a corda travada e surgiu um som MAIS FORTE e limpo
+    // (corda nova cujo ataque passou despercebido): destrava.
+    // Um som que só está morrendo nunca fica mais forte, então não destrava.
+    if(manual<0&&g.ap<0.15&&rms>T.lockPk*1.3&&++T.bad>=6){T.lock=null;T.idx=-1;T.cand=null;T.candN=0;T.hist=[];T.bad=0}
     return null;
   }
-  T.out=0;T.hist.push(m);if(T.hist.length>5)T.hist.shift();
-  const s=[...T.hist].sort((a,b)=>a-b);
-  return{midiF:s[s.length>>1],target:T.lock,idx:T.idx};
+  T.bad=0;
+  const m=toM(r.f);T.hist.push(m);if(T.hist.length>7)T.hist.shift();
+  const s=[...T.hist].sort((a,b)=>a-b),med=s[s.length>>1];
+  if(T.hist.length===1||T.emaLock!==T.lock){T.ema=med;T.emaLock=T.lock}else T.ema+=0.4*(med-T.ema);
+  return{midiF:T.ema,target:T.lock,idx:T.idx};
 }
 /*CORE-END*/
 
 /* ---------- audio ---------- */
 let ctx,analyser,buf,raf,lastProc=0,wakeLock=null,T=makeTracker();
+const SENS=[0.6,1,1.7],SENS_NAME=['Baixa','Normal','Alta'];
 function resetTracker(){T=makeTracker();inTuneSince=0}
 function ensureCtx(){if(!ctx)ctx=new (window.AudioContext||window.webkitAudioContext)();if(ctx.state==='suspended')ctx.resume();return ctx}
 async function start(){
@@ -394,7 +493,7 @@ function tick(){
   raf=requestAnimationFrame(tick);
   const now=performance.now();if(now-lastProc<40)return;lastProc=now;
   analyser.getFloatTimeDomainData(buf);
-  const r=track(T,buf,ctx.sampleRate,strMidi,prefs.a4,prefs.auto?-1:manualIdx);
+  const r=track(T,buf,ctx.sampleRate,strMidi,prefs.a4,prefs.auto?-1:manualIdx,SENS[prefs.sens]);
   if(r==='reset'){resetDisplay();inTuneSince=0;highlight(prefs.auto?-1:manualIdx)}
   else if(r)show(r);
 }
@@ -467,12 +566,14 @@ $('btnSaveCustom').onclick=()=>{
 };
 
 /* settings */
-function renderSettings(){$('aVal').textContent=prefs.a4+' Hz';$('tolVal').textContent='±'+prefs.tolHz.toFixed(2)+' Hz';drawOkArc()}
+function renderSettings(){$('sVal').textContent=SENS_NAME[prefs.sens];$('aVal').textContent=prefs.a4+' Hz';$('tolVal').textContent='±'+prefs.tolHz.toFixed(2)+' Hz';drawOkArc()}
 $('btnSettings').onclick=()=>{renderSettings();open('sheetSettings')};
 $('aMinus').onclick=()=>{prefs.a4=Math.max(420,prefs.a4-1);curFt=0;resetTracker();savePrefs();renderSettings()};
 $('aPlus').onclick=()=>{prefs.a4=Math.min(460,prefs.a4+1);curFt=0;resetTracker();savePrefs();renderSettings()};
 $('tolMinus').onclick=()=>{prefs.tolHz=Math.max(0.05,Math.round((prefs.tolHz-0.05)*100)/100);savePrefs();renderSettings()};
 $('tolPlus').onclick=()=>{prefs.tolHz=Math.min(1,Math.round((prefs.tolHz+0.05)*100)/100);savePrefs();renderSettings()};
+$('sMinus').onclick=()=>{prefs.sens=Math.max(0,prefs.sens-1);savePrefs();resetTracker();renderSettings()};
+$('sPlus').onclick=()=>{prefs.sens=Math.min(2,prefs.sens+1);savePrefs();resetTracker();renderSettings()};
 $('btnResetTuned').onclick=()=>{tuned=tuned.map(()=>false);highlight(prefs.auto?-1:manualIdx);closeSheet()};
 
 $('btnAuto').onclick=()=>setAuto(!prefs.auto);
